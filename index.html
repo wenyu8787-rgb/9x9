@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>打地鼠：九九乘法大挑戰 - 雲端版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&display=swap" rel="stylesheet">
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs, doc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase 配置與初始化
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'multiplication-whack';
+
+        // 暴露給全域使用
+        window.db = db;
+        window.appId = appId;
+        window.auth = auth;
+        window.addDoc = addDoc;
+        window.collection = collection;
+        window.getDocs = getDocs;
+
+        // 認證邏輯
+        const initAuth = async () => {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        };
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                console.log("Authenticated as:", user.uid);
+                window.currentUser = user;
+                loadLeaderboard(); // 認證後加載排行榜
+            }
+        });
+    </script>
+    <style>
+        body {
+            font-family: 'ZCOOL+KuaiLe', 'Microsoft JhengHei', sans-serif;
+            touch-action: manipulation;
+        }
+        .mole-hole { perspective: 1000px; }
+        .mole {
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            transform: translateY(105%);
+        }
+        .mole.up { transform: translateY(0%); }
+        .grass-pattern {
+            background-color: #4ade80;
+            background-image: radial-gradient(#22c55e 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        @keyframes flash-green { 0%, 100% { border-color: transparent; } 50% { border-color: #22c55e; } }
+        @keyframes flash-red { 0%, 100% { border-color: transparent; } 50% { border-color: #ef4444; } }
+        .correct-flash { border-width: 8px; animation: flash-green 0.4s ease-out; }
+        .wrong-flash { border-width: 8px; animation: flash-red 0.4s ease-out; }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #b45309; border-radius: 10px; }
+    </style>
+</head>
+<body class="grass-pattern min-h-screen flex flex-col items-center justify-start p-4 pt-8">
+
+    <!-- 頂端資訊欄 -->
+    <div class="w-full max-w-2xl flex justify-between items-center bg-white/90 backdrop-blur-md rounded-3xl p-4 md:p-6 shadow-2xl mb-6 border-b-8 border-green-600">
+        <div class="text-center">
+            <p class="text-gray-500 text-xs font-bold">SCORE</p>
+            <p id="score" class="text-3xl font-black text-green-700">0</p>
+        </div>
+        <div class="text-center">
+            <h1 class="text-xl md:text-2xl font-black text-amber-900 leading-none">九九乘法大挑戰</h1>
+            <div id="game-status" class="mt-2 text-[10px] md:text-xs font-bold text-white px-3 py-1 bg-amber-600 rounded-full inline-block">準備好挑戰了嗎？</div>
+        </div>
+        <div class="text-center">
+            <p class="text-gray-500 text-xs font-bold">TIME</p>
+            <p id="timer" class="text-3xl font-black text-red-500">30s</p>
+        </div>
+    </div>
+
+    <div class="flex flex-col lg:flex-row gap-6 w-full max-w-5xl items-start justify-center">
+        <!-- 排行榜 (左側/頂部) -->
+        <div class="w-full lg:w-64 bg-white/80 rounded-3xl p-4 shadow-xl border-t-4 border-amber-500 order-2 lg:order-1">
+            <h3 class="text-center font-black text-amber-800 mb-3 flex items-center justify-center gap-2">
+                🏆 排行榜
+            </h3>
+            <div id="leaderboard-list" class="space-y-2 max-h-48 lg:max-h-96 overflow-y-auto pr-1">
+                <p class="text-center text-xs text-gray-400 italic py-4">載入中...</p>
+            </div>
+        </div>
+
+        <!-- 遊戲主體 (中間) -->
+        <div class="flex-1 flex flex-col items-center order-1 lg:order-2 w-full">
+            <!-- 遊戲區域 -->
+            <div id="game-board" class="grid grid-cols-3 gap-3 md:gap-6 w-full max-w-lg bg-amber-800/20 p-4 rounded-[2.5rem] border-8 border-amber-900/20 relative">
+                <!-- 6 個洞穴 -->
+                <div class="mole-hole relative aspect-square bg-amber-950 rounded-full shadow-[inset_0_10px_15px_rgba(0,0,0,0.7)] overflow-hidden border-2 border-amber-900">
+                    <div class="mole absolute inset-0 flex items-center justify-center bg-gradient-to-b from-amber-400 to-amber-600 rounded-full border-4 border-amber-300 shadow-xl">
+                        <p class="question-text text-xl md:text-2xl font-black text-white drop-shadow-lg"></p>
+                    </div>
+                </div>
+                <div class="mole-hole relative aspect-square bg-amber-950 rounded-full shadow-[inset_0_10px_15px_rgba(0,0,0,0.7)] overflow-hidden border-2 border-amber-900">
+                    <div class="mole absolute inset-0 flex items-center justify-center bg-gradient-to-b from-amber-400 to-amber-600 rounded-full border-4 border-amber-300 shadow-xl">
+                        <p class="question-text text-xl md:text-2xl font-black text-white drop-shadow-lg"></p>
+                    </div>
+                </div>
+                <div class="mole-hole relative aspect-square bg-amber-950 rounded-full shadow-[inset_0_10px_15px_rgba(0,0,0,0.7)] overflow-hidden border-2 border-amber-900">
+                    <div class="mole absolute inset-0 flex items-center justify-center bg-gradient-to-b from-amber-400 to-amber-600 rounded-full border-4 border-amber-300 shadow-xl">
+                        <p class="question-text text-xl md:text-2xl font-black text-white drop-shadow-lg"></p>
+                    </div>
+                </div>
+                <div class="mole-hole relative aspect-square bg-amber-950 rounded-full shadow-[inset_0_10px_15px_rgba(0,0,0,0.7)] overflow-hidden border-2 border-amber-900">
+                    <div class="mole absolute inset-0 flex items-center justify-center bg-gradient-to-b from-amber-400 to-amber-600 rounded-full border-4 border-amber-300 shadow-xl">
+                        <p class="question-text text-xl md:text-2xl font-black text-white drop-shadow-lg"></p>
+                    </div>
+                </div>
+                <div class="mole-hole relative aspect-square bg-amber-950 rounded-full shadow-[inset_0_10px_15px_rgba(0,0,0,0.7)] overflow-hidden border-2 border-amber-900">
+                    <div class="mole absolute inset-0 flex items-center justify-center bg-gradient-to-b from-amber-400 to-amber-600 rounded-full border-4 border-amber-300 shadow-xl">
+                        <p class="question-text text-xl md:text-2xl font-black text-white drop-shadow-lg"></p>
+                    </div>
+                </div>
+                <div class="mole-hole relative aspect-square bg-amber-950 rounded-full shadow-[inset_0_10px_15px_rgba(0,0,0,0.7)] overflow-hidden border-2 border-amber-900">
+                    <div class="mole absolute inset-0 flex items-center justify-center bg-gradient-to-b from-amber-400 to-amber-600 rounded-full border-4 border-amber-300 shadow-xl">
+                        <p class="question-text text-xl md:text-2xl font-black text-white drop-shadow-lg"></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 答案按鈕 -->
+            <div id="answer-controls" class="mt-8 grid grid-cols-3 gap-3 w-full max-w-lg">
+                <button onclick="checkAnswer(this)" class="answer-btn opacity-50 bg-blue-500 text-white font-black py-4 md:py-6 rounded-2xl text-2xl md:text-3xl shadow-[0_6px_0_#1e40af] transition-all transform" disabled>?</button>
+                <button onclick="checkAnswer(this)" class="answer-btn opacity-50 bg-purple-500 text-white font-black py-4 md:py-6 rounded-2xl text-2xl md:text-3xl shadow-[0_6px_0_#6b21a8] transition-all transform" disabled>?</button>
+                <button onclick="checkAnswer(this)" class="answer-btn opacity-50 bg-pink-500 text-white font-black py-4 md:py-6 rounded-2xl text-2xl md:text-3xl shadow-[0_6px_0_#9d174d] transition-all transform" disabled>?</button>
+            </div>
+
+            <div id="start-controls" class="mt-8 flex flex-col items-center gap-4">
+                <input type="text" id="player-name" maxlength="10" placeholder="輸入玩家暱稱..." class="px-6 py-3 rounded-full border-4 border-amber-500 text-lg font-bold outline-none text-center focus:ring-4 ring-amber-300 transition-all">
+                <button onclick="startGame()" class="bg-orange-500 hover:bg-orange-600 text-white font-black px-12 py-4 rounded-full text-2xl shadow-[0_10px_0_#c2410c] active:translate-y-1 active:shadow-none transition-all transform hover:scale-110">
+                    開始遊戲
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 遊戲結束彈窗 -->
+    <div id="result-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-[3rem] p-8 max-w-sm w-full text-center border-8 border-amber-500 shadow-2xl relative overflow-hidden">
+            <div class="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-red-500 via-yellow-500 to-green-500"></div>
+            <h2 class="text-4xl font-black text-amber-600 mb-2">時間到！</h2>
+            <p id="saving-status" class="text-xs text-amber-700 font-bold mb-4">正在同步分數...</p>
+            <div class="my-6">
+                <p class="text-gray-400 font-bold uppercase tracking-widest text-sm">本次得分</p>
+                <p id="final-score" class="text-7xl font-black text-green-600">0</p>
+            </div>
+            <button onclick="closeModal()" class="w-full bg-green-500 hover:bg-green-600 text-white font-black py-4 rounded-full text-xl shadow-[0_8px_0_#16a34a] active:translate-y-1 active:shadow-none transition-all">
+                回主畫面
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // 音效系統 (Web Audio API)
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playTone(freq, duration, type = 'sine', volume = 0.1) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        const sounds = {
+            start: () => { playTone(440, 0.3, 'square'); setTimeout(() => playTone(880, 0.3, 'square'), 100); },
+            correct: () => playTone(1200, 0.2, 'sine', 0.15),
+            wrong: () => playTone(150, 0.3, 'sawtooth', 0.2),
+            end: () => { [330, 261, 196].forEach((f, i) => setTimeout(() => playTone(f, 0.5, 'sine'), i * 150)); }
+        };
+
+        // 遊戲變數
+        const scoreDisplay = document.getElementById('score');
+        const timerDisplay = document.getElementById('timer');
+        const statusDisplay = document.getElementById('game-status');
+        const moles = document.querySelectorAll('.mole');
+        const answerBtns = document.querySelectorAll('.answer-btn');
+        const gameBoard = document.getElementById('game-board');
+        const resultModal = document.getElementById('result-modal');
+        const playerNameInput = document.getElementById('player-name');
+
+        let score = 0;
+        let timeLeft = 30;
+        let gameActive = false;
+        let currentAnswer = null;
+        let timerId = null;
+        let moleId = null;
+        let lastHole = null;
+
+        function generateQuestion() {
+            const a = Math.floor(Math.random() * 8) + 2;
+            const b = Math.floor(Math.random() * 8) + 2;
+            const answer = a * b;
+            let distractors = new Set();
+            while(distractors.size < 2) {
+                const diff = (Math.floor(Math.random() * 6) + 1) * (Math.random() > 0.5 ? 1 : -1);
+                const wrong = answer + diff;
+                if (wrong > 0 && wrong !== answer) distractors.add(wrong);
+            }
+            const options = [answer, ...distractors].sort(() => Math.random() - 0.5);
+            return { question: `${a}×${b}`, answer, options };
+        }
+
+        function spawnMole() {
+            if (!gameActive) return;
+            const idx = Math.floor(Math.random() * moles.length);
+            const hole = moles[idx];
+            if (hole === lastHole) return spawnMole();
+            lastHole = hole;
+
+            const qData = generateQuestion();
+            hole.querySelector('.question-text').innerText = qData.question;
+            currentAnswer = qData.answer;
+
+            answerBtns.forEach((btn, i) => {
+                btn.innerText = qData.options[i];
+                btn.disabled = false;
+                btn.classList.remove('opacity-50');
+            });
+
+            hole.classList.add('up');
+            moleId = setTimeout(() => {
+                hole.classList.remove('up');
+                if (gameActive) spawnMole();
+            }, Math.random() * 1000 + 1500);
+        }
+
+        function startGame() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const name = playerNameInput.value.trim() || "無名英雄";
+            playerNameInput.value = name;
+            
+            score = 0;
+            timeLeft = 30;
+            gameActive = true;
+            scoreDisplay.innerText = score;
+            timerDisplay.innerText = `${timeLeft}s`;
+            statusDisplay.innerText = `加油，${name}！`;
+            document.getElementById('start-controls').classList.add('hidden');
+            
+            sounds.start();
+            spawnMole();
+
+            timerId = setInterval(() => {
+                timeLeft--;
+                timerDisplay.innerText = `${timeLeft}s`;
+                if (timeLeft <= 0) endGame();
+            }, 1000);
+        }
+
+        function checkAnswer(btn) {
+            if (!gameActive) return;
+            const selected = parseInt(btn.innerText);
+            
+            if (selected === currentAnswer) {
+                score += 10;
+                sounds.correct();
+                flashEffect('correct');
+                document.querySelector('.mole.up')?.classList.remove('up');
+                clearTimeout(moleId);
+                setTimeout(spawnMole, 200);
+            } else {
+                score = Math.max(0, score - 5);
+                sounds.wrong();
+                flashEffect('wrong');
+            }
+            scoreDisplay.innerText = score;
+        }
+
+        function flashEffect(type) {
+            const cls = type === 'correct' ? 'correct-flash' : 'wrong-flash';
+            gameBoard.classList.add(cls);
+            setTimeout(() => gameBoard.classList.remove(cls), 400);
+        }
+
+        async function endGame() {
+            gameActive = false;
+            clearInterval(timerId);
+            clearTimeout(moleId);
+            sounds.end();
+            
+            statusDisplay.innerText = "挑戰結束！";
+            moles.forEach(m => m.classList.remove('up'));
+            answerBtns.forEach(btn => {
+                btn.disabled = true;
+                btn.classList.add('opacity-50');
+            });
+
+            document.getElementById('final-score').innerText = score;
+            resultModal.classList.remove('hidden');
+            resultModal.classList.add('flex');
+
+            // 儲存分數到 Firebase
+            await saveScore(playerNameInput.value, score);
+        }
+
+        async function saveScore(name, score) {
+            if (!window.currentUser) return;
+            try {
+                document.getElementById('saving-status').innerText = "正在儲存分數...";
+                await addDoc(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'leaderboard'), {
+                    name: name,
+                    score: score,
+                    uid: window.currentUser.uid,
+                    timestamp: new Date().getTime()
+                });
+                document.getElementById('saving-status').innerText = "分數已上傳！";
+                loadLeaderboard();
+            } catch (e) {
+                console.error("Save score error:", e);
+                document.getElementById('saving-status').innerText = "儲存失敗，請檢查網路。";
+            }
+        }
+
+        async function loadLeaderboard() {
+            const listEl = document.getElementById('leaderboard-list');
+            try {
+                const querySnapshot = await getDocs(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'leaderboard'));
+                const scores = [];
+                querySnapshot.forEach(doc => scores.push(doc.data()));
+                
+                // 在記憶體中排序 (Firebase 複合成員查詢需要索引，所以我們抓全部後手動排)
+                scores.sort((a, b) => b.score - a.score);
+                const topScores = scores.slice(0, 10);
+
+                if (topScores.length === 0) {
+                    listEl.innerHTML = '<p class="text-center text-xs text-gray-400 py-4">暫無紀錄，快來當第一名！</p>';
+                    return;
+                }
+
+                listEl.innerHTML = topScores.map((s, i) => `
+                    <div class="flex items-center justify-between p-2 rounded-xl ${i === 0 ? 'bg-yellow-100 border border-yellow-300' : 'bg-gray-50'}">
+                        <div class="flex items-center gap-2">
+                            <span class="w-6 h-6 flex items-center justify-center rounded-full text-[10px] font-bold ${i < 3 ? 'bg-amber-500 text-white' : 'bg-gray-300 text-gray-600'}">
+                                ${i + 1}
+                            </span>
+                            <span class="font-bold text-sm truncate w-24 text-amber-900">${s.name}</span>
+                        </div>
+                        <span class="font-black text-amber-600">${s.score}</span>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error("Load leaderboard error:", e);
+                listEl.innerHTML = '<p class="text-center text-xs text-red-400 py-4">無法載入排行榜</p>';
+            }
+        }
+
+        function closeModal() {
+            resultModal.classList.add('hidden');
+            resultModal.classList.remove('flex');
+            document.getElementById('start-controls').classList.remove('hidden');
+            statusDisplay.innerText = "準備好再次挑戰了嗎？";
+        }
+    </script>
+</body>
+</html>
